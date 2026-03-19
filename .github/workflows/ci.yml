@@ -1,6 +1,6 @@
 name: CI Pipeline
 
-# Trigger on every push to main and on every PR targeting main
+# Trigger on every PR targeting main, and on direct pushes to main
 on:
   push:
     branches:
@@ -15,74 +15,71 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout source code ──────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Full history is required by SonarCloud to compute blame info
+          # Full git history is required by SonarCloud for blame / new-code detection
           fetch-depth: 0
 
-      # ── 2. Set up Java 17 ────────────────────────────────────────────────
+      # ── 2. Java 17 ───────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: maven          # caches ~/.m2 between runs
+          cache: maven
 
-      # ── 3. Compile ───────────────────────────────────────────────────────
-      - name: Compile
-        run: mvn --batch-mode compile
-
-      # ── 4. Run unit tests & generate JaCoCo coverage report ─────────────
-      - name: Run tests & generate coverage
+      # ── 3. Build + test + coverage (single Maven invocation) ─────────────
+      #    'verify' compiles, runs tests, generates JaCoCo report, AND
+      #    the spring-boot:repackage goal produces the fat JAR – all in one go.
+      - name: Build, test & generate coverage
         run: mvn --batch-mode verify
 
-      # ── 5. Publish test results ──────────────────────────────────────────
+      # ── 4. Publish JUnit test results as a PR check ──────────────────────
       - name: Publish test results
         uses: dorny/test-reporter@v1
-        if: always()            # run even when tests fail
+        if: always()
         with:
           name: JUnit Test Results
-          path: target/surefire-reports/*.xml
+          path: target/surefire-reports/TEST-*.xml
           reporter: java-junit
 
-      # ── 6. SonarCloud analysis ───────────────────────────────────────────
-      - name: SonarCloud analysis
+      # ── 5. SonarCloud static analysis ────────────────────────────────────
+      #    Uses the official SonarSource action – handles cache, scanner
+      #    download and result upload automatically.
+      - name: SonarCloud scan
+        uses: SonarSource/sonarcloud-github-action@master
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          mvn --batch-mode sonar:sonar \
-            -Dsonar.organization=${{ vars.SONAR_ORG }} \
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }} \
-            -Dsonar.host.url=https://sonarcloud.io \
-            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # needed for PR decoration
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}      # set in repo → Settings → Secrets
 
-      # ── 7. Upload JaCoCo HTML report as an artifact ──────────────────────
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-coverage-report
-          path: target/site/jacoco/
-          retention-days: 14
-
-      # ── 8. Build the Spring Boot fat JAR ─────────────────────────────────
-      - name: Package artifact
-        run: mvn --batch-mode package -DskipTests
-
-      # ── 9. Upload the JAR as a GitHub Actions artifact ───────────────────
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: url-shortener-jar
-          path: target/*.jar
-          retention-days: 14
-
-      # ── 10. (Optional) Check SonarCloud Quality Gate status ─────────────
-      - name: Check Quality Gate
+      # ── 6. SonarCloud Quality Gate ───────────────────────────────────────
+      #    Fails the pipeline if the Quality Gate is not green.
+      - name: Check SonarCloud Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
 
+      # ── 7. Upload JaCoCo HTML coverage report ────────────────────────────
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+          retention-days: 14
+
+      # ── 8. Upload the fat JAR ─────────────────────────────────────────────
+      #    'verify' already built and repackaged the JAR.
+      #    We exclude the .jar.original (thin JAR) – only upload the fat JAR.
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-shortener-${{ github.run_number }}
+          path: |
+            target/*.jar
+            !target/*.jar.original
+          retention-days: 14
