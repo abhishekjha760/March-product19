@@ -34,13 +34,33 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # ── 3. Build + test + coverage (single Maven invocation) ─────────────
-      #    'verify' compiles, runs tests, generates JaCoCo report, AND
-      #    the spring-boot:repackage goal produces the fat JAR – all in one go.
-      - name: Build, test & generate coverage
-        run: mvn --batch-mode verify
+      # ── 3. Build the fat JAR (skip tests so the JAR is always produced) ───
+      #    spring-boot:repackage is bound to the package phase.
+      #    Running with -DskipTests guarantees the JAR exists even when
+      #    tests fail later, so the artifact upload step always has something.
+      - name: Build JAR
+        run: mvn --batch-mode package -DskipTests
 
-      # ── 4. Publish JUnit test results as a PR check ──────────────────────
+      # ── 4. Upload the fat JAR immediately after build ────────────────────
+      #    Uploaded here so it is available even if subsequent steps fail.
+      #    We exclude the .jar.original (thin JAR) – only upload the fat JAR.
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-shortener-${{ github.run_number }}
+          path: |
+            target/*.jar
+            !target/*.jar.original
+          retention-days: 14
+
+      # ── 5. Run tests & generate JaCoCo coverage report ───────────────────
+      #    'continue-on-error' keeps subsequent steps (reports, Sonar) running
+      #    even when a test fails so all results are uploaded.
+      - name: Run tests & generate coverage
+        run: mvn --batch-mode test jacoco:report
+        continue-on-error: true
+
+      # ── 6. Publish JUnit test results as a PR check ──────────────────────
       - name: Publish test results
         uses: dorny/test-reporter@v1
         if: always()
@@ -49,7 +69,7 @@ jobs:
           path: target/surefire-reports/TEST-*.xml
           reporter: java-junit
 
-      # ── 5. Upload JaCoCo HTML coverage report ────────────────────────────
+      # ── 7. Upload JaCoCo HTML coverage report ────────────────────────────
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         if: always()
@@ -58,20 +78,7 @@ jobs:
           path: target/site/jacoco/
           retention-days: 14
 
-      # ── 6. Upload the fat JAR ─────────────────────────────────────────────
-      #    'verify' already built and repackaged the JAR.
-      #    We exclude the .jar.original (thin JAR) – only upload the fat JAR.
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: url-shortener-${{ github.run_number }}
-          path: |
-            target/*.jar
-            !target/*.jar.original
-          retention-days: 14
-
-      # ── 7. SonarCloud static analysis ────────────────────────────────────
+      # ── 8. SonarCloud static analysis ────────────────────────────────────
       #    Skipped automatically when SONAR_TOKEN secret is not configured.
       - name: SonarCloud scan
         if: ${{ secrets.SONAR_TOKEN != '' }}
@@ -80,7 +87,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # needed for PR decoration
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}      # set in repo → Settings → Secrets
 
-      # ── 8. SonarCloud Quality Gate ───────────────────────────────────────
+      # ── 9. SonarCloud Quality Gate ───────────────────────────────────────
       #    Fails the pipeline if the Quality Gate is not green.
       - name: Check SonarCloud Quality Gate
         if: ${{ secrets.SONAR_TOKEN != '' }}
